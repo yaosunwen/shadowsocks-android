@@ -22,20 +22,18 @@ package com.github.shadowsocks.plugin
 
 import android.content.Intent
 import android.os.Bundle
-import android.support.v7.app.AppCompatActivity
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 
 /**
  * Activity that's capable of getting EXTRA_OPTIONS input.
  */
 abstract class OptionsCapableActivity : AppCompatActivity() {
-    protected fun pluginOptions(intent: Intent = this.intent): PluginOptions {
-        return try {
-            PluginOptions(intent.getStringExtra(PluginContract.EXTRA_OPTIONS))
-        } catch (exc: IllegalArgumentException) {
-            Toast.makeText(this, exc.message, Toast.LENGTH_SHORT).show()
-            PluginOptions()
-        }
+    protected fun pluginOptions(intent: Intent = this.intent) = try {
+        PluginOptions("", intent.getStringExtra(PluginContract.EXTRA_OPTIONS))
+    } catch (exc: IllegalArgumentException) {
+        Toast.makeText(this, exc.message, Toast.LENGTH_SHORT).show()
+        PluginOptions()
     }
 
     /**

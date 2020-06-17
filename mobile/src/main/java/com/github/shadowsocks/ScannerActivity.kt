@@ -20,77 +20,147 @@
 
 package com.github.shadowsocks
 
-import android.content.pm.PackageManager
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.ShortcutManager
+import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.support.v4.app.ActivityCompat
-import android.support.v4.app.TaskStackBuilder
-import android.support.v4.content.ContextCompat
-import android.support.v7.app.AppCompatActivity
-import android.support.v7.widget.Toolbar
+import android.util.SparseArray
+import android.view.Menu
+import android.view.MenuItem
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.getSystemService
+import androidx.core.util.forEach
 import com.github.shadowsocks.database.Profile
 import com.github.shadowsocks.database.ProfileManager
-import com.github.shadowsocks.utils.resolveResourceId
-import com.google.zxing.Result
-import me.dm7.barcodescanner.zxing.ZXingScannerView
+import com.github.shadowsocks.utils.datas
+import com.github.shadowsocks.utils.forEachTry
+import com.github.shadowsocks.utils.openBitmap
+import com.github.shadowsocks.utils.readableMessage
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.android.gms.samples.vision.barcodereader.BarcodeCapture
+import com.google.android.gms.samples.vision.barcodereader.BarcodeGraphic
+import com.google.android.gms.vision.Frame
+import com.google.android.gms.vision.barcode.Barcode
+import com.google.android.gms.vision.barcode.BarcodeDetector
+import timber.log.Timber
+import xyz.belvi.mobilevisionbarcodescanner.BarcodeRetriever
 
-class ScannerActivity : AppCompatActivity(), ZXingScannerView.ResultHandler {
+class ScannerActivity : AppCompatActivity(), BarcodeRetriever {
     companion object {
-        private const val MY_PERMISSIONS_REQUEST_CAMERA = 1
+        private const val REQUEST_IMPORT = 2
+        private const val REQUEST_IMPORT_OR_FINISH = 3
+        private const val REQUEST_GOOGLE_API = 4
     }
 
-    private lateinit var scannerView: ZXingScannerView
+    private lateinit var detector: BarcodeDetector
 
-    private fun navigateUp() {
-        val intent = parentActivityIntent
-        if (shouldUpRecreateTask(intent) || isTaskRoot)
-            TaskStackBuilder.create(this).addNextIntentWithParentStack(intent).startActivities()
-        else finish()
+    private fun fallback() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
+                    "market://details?id=com.github.sumimakito.awesomeqrsample")))
+        } catch (_: ActivityNotFoundException) { }
+        finish()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.layout_scanner)
-        val toolbar = findViewById<Toolbar>(R.id.toolbar)
-        toolbar.title = title
-        toolbar.setNavigationIcon(theme.resolveResourceId(R.attr.homeAsUpIndicator))
-        toolbar.setNavigationOnClickListener { navigateUp() }
-        scannerView = findViewById(R.id.scanner)
-        if (Build.VERSION.SDK_INT >= 25) getSystemService(ShortcutManager::class.java).reportShortcutUsed("scan")
-    }
-
-    override fun onResume() {
-        super.onResume()
-        val permissionCheck = ContextCompat.checkSelfPermission(this,
-                android.Manifest.permission.CAMERA)
-        if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
-            scannerView.setResultHandler(this)  // Register ourselves as a handler for scan results.
-            scannerView.startCamera()           // Start camera on resume
-        } else ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.CAMERA),
-                MY_PERMISSIONS_REQUEST_CAMERA)
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        if (requestCode == MY_PERMISSIONS_REQUEST_CAMERA)
-            if (grantResults.getOrNull(0) == PackageManager.PERMISSION_GRANTED) {
-                scannerView.setResultHandler(this)
-                scannerView.startCamera()
+        detector = BarcodeDetector.Builder(this)
+                .setBarcodeFormats(Barcode.QR_CODE)
+                .build()
+        if (!detector.isOperational) {
+            val availability = GoogleApiAvailability.getInstance()
+            val dialog = availability.getErrorDialog(this, availability.isGooglePlayServicesAvailable(this),
+                    REQUEST_GOOGLE_API)
+            if (dialog == null) {
+                Toast.makeText(this, R.string.common_google_play_services_notification_ticker, Toast.LENGTH_SHORT)
+                        .show()
+                fallback()
             } else {
-                Toast.makeText(this, R.string.add_profile_scanner_permission_required, Toast.LENGTH_SHORT).show()
-                finish()
+                dialog.setOnDismissListener { fallback() }
+                dialog.show()
             }
-        else super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 25) getSystemService<ShortcutManager>()!!.reportShortcutUsed("scan")
+        if (try {
+                    getSystemService<CameraManager>()?.cameraIdList?.isEmpty()
+                } catch (_: CameraAccessException) {
+                    true
+                } != false) {
+            startImport()
+            return
+        }
+        setContentView(R.layout.layout_scanner)
+        setSupportActionBar(findViewById(R.id.toolbar))
+        supportActionBar!!.setDisplayHomeAsUpEnabled(true)
+        val capture = supportFragmentManager.findFragmentById(R.id.barcode) as BarcodeCapture
+        capture.setCustomDetector(detector)
+        capture.setRetrieval(this)
     }
 
-    override fun onPause() {
-        super.onPause()
-        scannerView.stopCamera()    // Stop camera on pause
+    override fun onRetrieved(barcode: Barcode) = runOnUiThread {
+        Profile.findAllUrls(barcode.rawValue, Core.currentProfile?.main).forEach { ProfileManager.createProfile(it) }
+        onSupportNavigateUp()
+    }
+    override fun onRetrievedMultiple(closetToClick: Barcode?, barcode: MutableList<BarcodeGraphic>?) = check(false)
+    override fun onBitmapScanned(sparseArray: SparseArray<Barcode>?) { }
+    override fun onRetrievedFailed(reason: String?) = Timber.w(reason)
+    override fun onPermissionRequestDenied() {
+        Toast.makeText(this, R.string.add_profile_scanner_permission_required, Toast.LENGTH_SHORT).show()
+        startImport()
     }
 
-    override fun handleResult(rawResult: Result?) {
-        Profile.findAll(rawResult?.text).forEach { ProfileManager.createProfile(it) }
-        navigateUp()
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menuInflater.inflate(R.menu.scanner_menu, menu)
+        return true
+    }
+    override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {
+        R.id.action_import_clipboard -> {
+            startImport(true)
+            true
+        }
+        else -> false
+    }
+
+    /**
+     * See also: https://stackoverflow.com/a/31350642/2245107
+     */
+    override fun shouldUpRecreateTask(targetIntent: Intent?) = super.shouldUpRecreateTask(targetIntent) || isTaskRoot
+
+    private fun startImport(manual: Boolean = false) = startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "image/*"
+        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    }, if (manual) REQUEST_IMPORT else REQUEST_IMPORT_OR_FINISH)
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        when (requestCode) {
+            REQUEST_IMPORT, REQUEST_IMPORT_OR_FINISH -> if (resultCode == Activity.RESULT_OK) {
+                val feature = Core.currentProfile?.main
+                try {
+                    var success = false
+                    data!!.datas.forEachTry { uri ->
+                        detector.detect(Frame.Builder().setBitmap(contentResolver.openBitmap(uri)).build())
+                                .forEach { _, barcode ->
+                                    Profile.findAllUrls(barcode.rawValue, feature).forEach {
+                                        ProfileManager.createProfile(it)
+                                        success = true
+                                    }
+                                }
+                    }
+                    Toast.makeText(this, if (success) R.string.action_import_msg else R.string.action_import_err,
+                            Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, e.readableMessage, Toast.LENGTH_LONG).show()
+                }
+                onSupportNavigateUp()
+            } else if (requestCode == REQUEST_IMPORT_OR_FINISH) onSupportNavigateUp()
+            else -> super.onActivityResult(requestCode, resultCode, data)
+        }
     }
 }
